@@ -1,3 +1,14 @@
+---
+---
+
+@import "{{ site.theme }}";
+
+/* Hide the site footer completely */
 .site-footer {
+  display: none !important;
+}
+
+/* Additional selector to ensure all footer elements are hidden */
+footer, .site-footer-owner, .site-footer-credits {
   display: none !important;
 }
