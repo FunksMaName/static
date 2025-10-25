@@ -1,0 +1,402 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.IdentityModel.Tokens;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+{
+    ["Jwt:Issuer"] = "https://118118Money.com",
+    ["Jwt:Audience"] = "spa-client",
+    ["Jwt:SigningKey"] = "lw6v4Z3Ykm6uJ81r8yUKST0ZpudXtj2n"
+});
+
+
+builder.Services.AddAuthentication(options =>
+    {
+        options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+        options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+    })
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"],
+            ValidAudience = builder.Configuration["Jwt:Audience"],
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:SigningKey"]!)),
+            ClockSkew = TimeSpan.FromMinutes(1)
+        };
+    });
+
+builder.Services.AddAuthorization();
+builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
+
+
+builder.Services.AddCors(o =>
+{
+    o.AddDefaultPolicy(p => p
+        .WithOrigins("https://118118Money.com") // SPA origin
+        .AllowAnyHeader()
+        .AllowAnyMethod()
+        .AllowCredentials());
+});
+
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
+
+// --- Helpers (local functions) ---
+string CreateJwt(Guid userId, IConfiguration cfg, IEnumerable<Claim>? extraClaims = null)
+{
+    var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(cfg["Jwt:SigningKey"]!));
+    var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+    var claims = new List<Claim>
+    {
+        new(JwtRegisteredClaimNames.Sub, userId.ToString()),
+        new(ClaimTypes.NameIdentifier, userId.ToString()),
+    };
+    if (extraClaims is not null) claims.AddRange(extraClaims);
+
+    var token = new JwtSecurityToken(
+        issuer: cfg["Jwt:Issuer"],
+        audience: cfg["Jwt:Audience"],
+        claims: claims,
+        notBefore: DateTime.UtcNow,
+        expires: DateTime.UtcNow.AddMinutes(10), // short-lived access token
+        signingCredentials: creds);
+
+    return new JwtSecurityTokenHandler().WriteToken(token);
+}
+
+async Task<Guid?> AuthenticateAsync(string username, string password)
+{
+    // TODO: replace with your real user check (EF Core / Identity / etc)
+    await Task.CompletedTask;
+    return (username == "demo" && password == "Password123!") ? Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") : null;
+}
+
+var auth = app.MapGroup("/auth");
+
+// POST /auth/login
+auth.MapPost("/login", async Task<Results<Ok<LoginResponse>, UnauthorizedHttpResult>> (
+    [FromBody] LoginDto dto,
+    IRefreshTokenStore store,
+    IConfiguration cfg,
+    HttpResponse http) =>
+{
+    var userId = await AuthenticateAsync(dto.Username, dto.Password);
+    if (userId is null) return TypedResults.Unauthorized();
+
+    var accessToken = CreateJwt(userId.Value, cfg);
+    var (refreshToken, tokenId) = await store.IssueAsync(userId.Value);
+
+    // HttpOnly refresh token cookie
+    http.Cookies.Append("rt", refreshToken, new CookieOptions
+    {
+        HttpOnly = true,
+        Secure = true,
+        SameSite = SameSiteMode.Strict,
+        Expires = DateTimeOffset.UtcNow.AddDays(14)
+    });
+
+    return TypedResults.Ok(new LoginResponse(accessToken));
+});
+
+// POST /auth/refresh
+auth.MapPost("/refresh", async Task<Results<Ok<LoginResponse>, UnauthorizedHttpResult>> (
+    HttpRequest request,
+    HttpResponse response,
+    IRefreshTokenStore store,
+    IConfiguration cfg) =>
+{
+    if (!request.Cookies.TryGetValue("rt", out var refreshToken))
+        return TypedResults.Unauthorized();
+
+    var userId = await store.ValidateAndRotateAsync(refreshToken);
+    if (userId is null) return TypedResults.Unauthorized();
+
+    var newAccess = CreateJwt(userId.Value, cfg);
+    var (newRefresh, _) = await store.IssueAsync(userId.Value);
+
+    response.Cookies.Append("rt", newRefresh, new CookieOptions
+    {
+        HttpOnly = true,
+        Secure = true,
+        SameSite = SameSiteMode.Strict,
+        Expires = DateTimeOffset.UtcNow.AddDays(14)
+    });
+
+    return TypedResults.Ok(new LoginResponse(newAccess));
+});
+
+// GET /auth/me (protected)
+auth.MapGet("/me", (ClaimsPrincipal user) =>
+{
+    var id = user.FindFirstValue(ClaimTypes.NameIdentifier);
+    return TypedResults.Ok(new { userId = id });
+}).RequireAuthorization();
+
+// Sample protected API
+var todos = app.MapGroup("/api/todos").RequireAuthorization();
+todos.MapGet("/", () => new[] { "one", "two" });
+
+
+app.MapGet("/ping", () => "pong")
+    .WithName("Ping")
+    .WithOpenApi();
+
+app.Run();
+
+public record LoginDto(string Username, string Password);
+public record LoginResponse(string AccessToken);
+
+public interface IRefreshTokenStore
+{
+    Task<(string token, Guid tokenId)> IssueAsync(Guid userId);
+    Task<Guid?> ValidateAndRotateAsync(string presentedToken); // returns userId if valid + rotates
+    Task RevokeAsync(Guid tokenId);
+}
+
+// Simple demo memory store — replace with persistent EF Core table in production.
+public class InMemoryRefreshTokenStore : IRefreshTokenStore
+{
+    private readonly Dictionary<Guid, RefreshRecord> _store = new();
+    private readonly object _lock = new();
+
+    public Task<(string token, Guid tokenId)> IssueAsync(Guid userId)
+    {
+        var tokenId = Guid.NewGuid();
+        var token = GenerateOpaqueToken();
+        var rec = new RefreshRecord
+        {
+            Id = tokenId,
+            UserId = userId,
+            TokenHash = Hash(token),
+            ExpiresUtc = DateTime.UtcNow.AddDays(14),
+            RevokedUtc = null
+        };
+        lock (_lock) _store[tokenId] = rec;
+        return Task.FromResult((token, tokenId));
+    }
+    
+    public Task<Guid?> ValidateAndRotateAsync(string presentedToken)
+    {
+        var now = DateTime.UtcNow;
+        var hash = Hash(presentedToken);
+        RefreshRecord? match;
+        lock (_lock)
+        {
+            match = _store.Values.FirstOrDefault(r =>
+                r.TokenHash == hash && r.RevokedUtc is null && r.ExpiresUtc > now);
+            if (match is null) return Task.FromResult<Guid?>(null);
+
+            // rotate: revoke old, issue new
+            _store[match.Id] = match with { RevokedUtc = now };
+            var newId = Guid.NewGuid();
+            var newToken = GenerateOpaqueToken();
+            _store[newId] = new RefreshRecord
+            {
+                Id = newId,
+                UserId = match.UserId,
+                TokenHash = Hash(newToken),
+                ExpiresUtc = now.AddDays(14),
+                RevokedUtc = null
+            };
+
+            // stash new token value on thread for cookie writer? not needed here:
+            // we return just the userId and caller will IssueAsync to create final cookie
+        }
+        return Task.FromResult<Guid?>(match.UserId);
+    }
+    
+    public Task RevokeAsync(Guid tokenId)
+    {
+        lock (_lock)
+        {
+            if (_store.TryGetValue(tokenId, out var rec))
+                _store[tokenId] = rec with { RevokedUtc = DateTime.UtcNow };
+        }
+        return Task.CompletedTask;
+    }
+
+    static string GenerateOpaqueToken()
+    {
+        var bytes = RandomNumberGenerator.GetBytes(32);
+        return Convert.ToBase64String(bytes);
+    }
+
+    static string Hash(string value)
+    {
+        using var sha = SHA256.Create();
+        var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(value));
+        return Convert.ToHexString(hash);
+    }
+
+    private record RefreshRecord
+    {
+        public required Guid Id { get; init; }
+        public required Guid UserId { get; init; }
+        public required string TokenHash { get; init; }
+        public required DateTime ExpiresUtc { get; init; }
+        public DateTime? RevokedUtc { get; init; }
+    }
+}
+
+
+
+"use client";
+
+import {useState, useRef} from "react";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "https://localhost:7013";
+
+export default function Page() {
+
+    const [username, setUsername] = useState("");
+    const [password, setPassword] = useState("");
+    const [status, setStatus] = useState<null | string>(null);
+
+    // access token in-memory (resets on full reload; that's OK)
+    const accessTokenRef = useRef<string | null>(null);
+
+    async function handleLogin(e: React.FormEvent<HTMLFormElement>) {
+        e.preventDefault();
+        setStatus("Signing in…");
+
+        try {
+            const res = await fetch(`${API_BASE}/auth/login`, {
+                method: "POST",
+                credentials: "include", // <-- send/receive cookies (refresh token)
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({username, password}),
+            });
+
+            if (!res.ok) {
+                setStatus("Invalid credentials.");
+                return;
+            }
+
+            const data: { accessToken: string } = await res.json();
+            accessTokenRef.current = data.accessToken;
+            setStatus("Signed in!");
+            setUsername("");
+            setPassword("");
+
+        } catch (err) {
+            setStatus("Error signing in.");
+        }
+    }
+
+    // Example of calling a protected API using the in-memory access token
+    async function callProtected() {
+        setStatus("Calling /auth/me…");
+        const token = accessTokenRef.current;
+        if (!token) {
+            setStatus("Please sign in first.");
+            return;
+        }
+
+        const res = await fetch(`${API_BASE}/auth/me`, {
+            method: "GET",
+            credentials: "include", // keeps refresh flow possible server-side if you add one
+            headers: {Authorization: `Bearer ${token}`},
+        });
+
+        if (res.status === 401) {
+            // (Optional) You could attempt a silent refresh here by calling /auth/refresh,
+            // then retry with the new access token.
+            setStatus("Unauthorized (token expired?).");
+            return;
+        }
+
+        const json = await res.json();
+        setStatus(`Hello user ${json.userId}`);
+    }
+
+    return (
+        <div
+            className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
+            <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
+                <div className="w-full max-w-sm">
+                    <h1 className="text-2xl font-semibold mb-6">Welcome to auth</h1>
+
+                    <form onSubmit={handleLogin} className="space-y-4">
+                        <div>
+                            <label className="block text-sm mb-1" htmlFor="username">
+                                Username
+                            </label>
+                            <input
+                                id="username"
+                                value={username}
+                                onChange={(e) => setUsername(e.target.value)}
+                                className="w-full rounded-xl border px-3 py-2 outline-none focus:ring"
+                                autoComplete="username"
+                                required
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm mb-1" htmlFor="password">
+                                Password
+                            </label>
+                            <input
+                                id="password"
+                                type="password"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                className="w-full rounded-xl border px-3 py-2 outline-none focus:ring"
+                                autoComplete="current-password"
+                                required
+                            />
+                        </div>
+
+                        <button
+                            type="submit"
+                            className="w-full rounded-xl bg-black text-white py-2 hover:opacity-90">
+                            Sign in
+                        </button>
+                    </form>
+
+                    <div className="mt-4 flex items-center gap-2">
+                        <button
+                            onClick={callProtected}
+                            className="rounded-xl border px-3 py-2 hover:bg-gray-50"
+                        >
+                            Call /auth/me
+                        </button>
+                        <span className="text-sm text-gray-600">{status}</span>
+                    </div>
+
+                    <p className="mt-4 text-xs text-gray-500">
+                        Note: the API should set an <code>HttpOnly</code> refresh-token cookie on{" "}
+                        <code>/auth/login</code>. This page stores the access token only in memory and
+                        sends it via <code>Authorization: Bearer</code> for protected requests.
+                    </p>
+                </div>
+            </main>
+        </div>
+    )
+}
