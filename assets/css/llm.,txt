@@ -1,0 +1,200 @@
+ublic class PromptScraps
+{
+    public (string, string) Test()
+    {
+        var request = new PromptRequest
+        {
+            SystemInstruction = "You are an assistant extracting key data from 118Money credit card statements.",
+            UserPrompt = "Extract the name and current balance from the statement: [statement text here].",
+            Properties =
+            [
+                new() { Name = "Name", Type = "string", Description = "extract name on statement" },
+                new() { Name = "Balance", Type = "number", Description = "extract balance on statement" }
+            ]
+        };
+        
+        var factory = new PromptFactory();
+
+        var chatGptPayload = factory.BuildRequest(request, new LlmConfiguration(LlmProvider.ChatGpt, "gpt-4o-mini"));
+        var geminiPayload = factory.BuildRequest(request, new LlmConfiguration(LlmProvider.Gemini, "gemini-pro"));
+        
+        Console.WriteLine("OpenAI JSON:");
+        Console.WriteLine(chatGptPayload);
+
+        Console.WriteLine("\nGemini JSON:");
+        Console.WriteLine(geminiPayload);
+        
+        return (chatGptPayload, geminiPayload);
+    }
+}
+
+public enum LlmProvider
+{
+    None,
+    ChatGpt,
+    Gemini
+}
+
+public record LlmConfiguration(LlmProvider Provider, string Model);
+
+public class PromptProperty
+{
+    public string Name { get; set; } = null!;
+    public string Type { get; set; } = null!; // "string", "number"
+    public string Description { get; set; } = null!;
+}
+
+public class PromptRequest
+{
+    public string SystemInstruction { get; set; } = null!;
+    public string UserPrompt { get; set; } = null!;
+    public List<PromptProperty> Properties { get; set; } = [];
+}
+
+public interface IPromptFactory
+{
+    string BuildRequest(PromptRequest request, LlmConfiguration provider);
+    Dictionary<string, object?> ParseResponse(string jsonResponse, LlmConfiguration provider);
+}
+
+public class PromptFactory : IPromptFactory
+{
+    private static readonly JsonSerializerOptions SerializerOptions = new JsonSerializerOptions
+        { WriteIndented = true };
+    
+    public string BuildRequest(PromptRequest request, LlmConfiguration llmConfiguration)
+    {
+        return llmConfiguration.Provider switch
+        {
+            LlmProvider.ChatGpt => BuildOpenAiRequest(request, llmConfiguration),
+            LlmProvider.Gemini => BuildGeminiRequest(request, llmConfiguration),
+            _ => throw new NotSupportedException()
+        };
+    }
+    
+    private string BuildOpenAiRequest(PromptRequest request, LlmConfiguration llmConfiguration)
+    {
+        var functions = new[]
+        {
+            new
+            {
+                name = "extract_key_information",
+                description = "Extract key information from a statement",
+                parameters = new
+                {
+                    type = "object",
+                    properties = request.Properties.ToDictionary(
+                        p => p.Name.ToLowerInvariant(),
+                        p => new
+                        {
+                            type = "object",
+                            properties = new
+                            {
+                                value = new { type = p.Type, description = p.Description },
+                                confidence = new { type = "number", description = $"confidence score (0-100) for {p.Name}" }
+                            },
+                            required = new[] { "value", "confidence" }
+                        }),
+                    required = request.Properties.Select(p => p.Name.ToLowerInvariant()).ToArray()
+                }
+            }
+        };
+
+        var payload = new
+        {
+            model = llmConfiguration.Model,
+            messages = new[]
+            {
+                new { role = "system", content = request.SystemInstruction },
+                new { role = "user", content = request.UserPrompt }
+            },
+            function_call = "auto",
+            functions
+        };
+
+        return JsonSerializer.Serialize(payload, SerializerOptions);
+    }
+    
+    private string BuildGeminiRequest(PromptRequest request, LlmConfiguration llmConfiguration)
+    {
+        var functionDeclarations = new[]
+        {
+            new
+            {
+                name = "extract_key_information",
+                description = "Extract key information from a statement",
+                parameters = new
+                {
+                    type = "object",
+                    properties = request.Properties.ToDictionary(
+                        p => p.Name.ToLowerInvariant(),
+                        p => new
+                        {
+                            type = "object",
+                            properties = new
+                            {
+                                value = new { type = p.Type, description = p.Description },
+                                confidence = new { type = "number", description = $"confidence score (0-100) for {p.Name}" }
+                            },
+                            required = new[] { "value", "confidence" }
+                        }),
+                    required = request.Properties.Select(p => p.Name.ToLowerInvariant()).ToArray()
+                }
+            }
+        };
+
+        var payload = new
+        {
+            model = $"models/{llmConfiguration.Model}",
+            system_instruction = new
+            {
+                parts = new[] { new { text = request.SystemInstruction } }
+            },
+            contents = new[]
+            {
+                new { role = "user", parts = new[] { new { text = request.UserPrompt } } }
+            },
+            tools = new[]
+            {
+                new { function_declarations = functionDeclarations }
+            },
+            tool_config = new { function_calling = "AUTO" }
+        };
+
+        return JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
+    }
+    
+    public Dictionary<string, object?> ParseResponse(string jsonResponse, LlmConfiguration llmConfiguration)
+    {
+        using var doc = JsonDocument.Parse(jsonResponse);
+        var result = new Dictionary<string, object?>();
+
+        switch (llmConfiguration.Provider)
+        {
+            case LlmProvider.ChatGpt:
+                // Example path: choices[0].message.function_call.arguments
+                var args = doc.RootElement
+                    .GetProperty("choices")[0]
+                    .GetProperty("message")
+                    .GetProperty("function_call")
+                    .GetProperty("arguments")
+                    .GetRawText();
+                result = JsonSerializer.Deserialize<Dictionary<string, object?>>(args)!;
+                break;
+
+            case LlmProvider.Gemini:
+                // Example path: candidates[0].content.parts[0].functionCall.args
+                var gemArgs = doc.RootElement
+                    .GetProperty("candidates")[0]
+                    .GetProperty("content")
+                    .GetProperty("parts")[0]
+                    .GetProperty("functionCall")
+                    .GetProperty("args")
+                    .GetRawText();
+                result = JsonSerializer.Deserialize<Dictionary<string, object?>>(gemArgs)!;
+                break;
+        }
+
+        return result;
+    }
+}
