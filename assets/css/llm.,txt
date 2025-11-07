@@ -198,3 +198,109 @@ public class PromptFactory : IPromptFactory
         return result;
     }
 }
+
+
+
+public sealed class OwnerRequirement : IAuthorizationRequirement
+{
+    public static OwnerRequirement Instance { get; } = new();
+    private OwnerRequirement() {}
+}
+
+public sealed class DepartmentMemberRequirement : IAuthorizationRequirement
+{
+    public static DepartmentMemberRequirement Instance { get; } = new();
+    private DepartmentMemberRequirement() {}
+}
+
+// Resource: only the owner may access
+public sealed class OwnerAuthHandler : AuthorizationHandler<OwnerRequirement, Resource>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, OwnerRequirement requirement, Resource resource)
+    {
+        var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (userId != null && Guid.TryParse(userId, out var id) && id == resource.OwnerUserId)
+            context.Succeed(requirement);
+
+        return Task.CompletedTask;
+    }
+}
+
+// Department: only users assigned to that department
+public sealed class DepartmentMemberHandler : AuthorizationHandler<DepartmentMemberRequirement, Department>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, DepartmentMemberRequirement requirement, Department department)
+    {
+        var claim = context.User.FindFirst("dept")?.Value;
+        if (claim != null && Guid.TryParse(claim, out var deptId) && deptId == department.Id)
+            context.Succeed(requirement);
+
+        return Task.CompletedTask;
+    }
+}
+
+// builder.Services.AddAuthorization();
+// builder.Services.AddSingleton<IAuthorizationHandler, OwnerAuthHandler>();
+// builder.Services.AddSingleton<IAuthorizationHandler, DepartmentMemberHandler>();
+
+
+// app.MapGet("/resources/{id:guid}", async (
+//     Guid id, ClaimsPrincipal user, IAuthorizationService authz, AppDb db) =>
+// {
+//     var entity = await db.Resources.AsNoTracking().SingleOrDefaultAsync(r => r.Id == id);
+//     if (entity is null) return Results.NotFound();
+//
+//     var result = await authz.AuthorizeAsync(user, entity, OwnerRequirement.Instance);
+//     return result.Succeeded ? Results.Ok(entity) : Results.Forbid();
+// }).RequireAuthorization();
+
+
+// // GET /departments/{id} — only members of that department can read
+// app.MapGet("/departments/{id:guid}", async (
+//     Guid id, ClaimsPrincipal user, IAuthorizationService authz, AppDb db) =>
+// {
+//     var dept = await db.Departments.AsNoTracking().SingleOrDefaultAsync(d => d.Id == id);
+//     if (dept is null) return Results.NotFound();
+//
+//     var result = await authz.AuthorizeAsync(user, dept, DepartmentMemberRequirement.Instance);
+//     return result.Succeeded ? Results.Ok(dept) : Results.Forbid();
+// }).RequireAuthorization();
+
+
+// // List my resources only
+// app.MapGet("/resources", async (ClaimsPrincipal user, AppDb db) =>
+// {
+//     var uid = GetUserId(user) ?? Guid.Empty;
+//     var items = await db.Resources.Where(r => r.OwnerUserId == uid).ToListAsync();
+//     return Results.Ok(items);
+// }).RequireAuthorization();
+//
+// // List only my department
+// app.MapGet("/departments/me", (ClaimsPrincipal user) =>
+// {
+//     var deptId = GetDeptId(user);
+//     return deptId is null ? Results.Forbid() : Results.Redirect($"/departments/{deptId}");
+// }).RequireAuthorization();
+
+public class Resource
+{
+    public Guid Id { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public User Owner { get; set; } = default!;
+}
+
+public class User
+{
+    public Guid Id { get; set; }
+    public Guid DepartmentId { get; set; }
+    public Department Department { get; set; } = default!;
+    public ICollection<Resource> Resources { get; set; } = new List<Resource>();
+}
+
+public class Department
+{
+    public Guid Id { get; set; }
+    public string Name { get; set; } = "";
+}
