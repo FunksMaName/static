@@ -304,3 +304,71 @@ public class Department
     public Guid Id { get; set; }
     public string Name { get; set; } = "";
 }
+
+
+auth.MapPost("/upload", async (IFormFile file) =>
+    {
+        if (file.Length == 0)
+        {
+            return Results.BadRequest("No file uploaded or file is empty.");
+        }
+    
+        if (!file.ContentType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"Warning: unexpected content type {file.ContentType}");
+        }
+    
+        var uploadedFile = new InMemoryRefreshTokenStore.UploadedFile(
+            FileName: file.FileName,
+            ContentType: file.ContentType,
+            Length: file.Length,
+            ContentStream: file.OpenReadStream());
+
+        var result = await new InMemoryRefreshTokenStore.StatementService().ProcessStatementAsync(uploadedFile);
+    
+
+        // For a statement you might want to return JSON instead
+        return Results.Ok(new
+        {
+            FileName = file.FileName,
+            Length = file.Length,
+            ExtractedText = result.RawText
+        });
+    }).DisableAntiforgery();
+    
+    public sealed record UploadedFile(
+        string FileName,
+        string ContentType,
+        long Length,
+        Stream ContentStream);
+
+    public sealed record StatementResult(string RawText);
+    
+    public class  StatementService
+    {
+        public async Task<StatementResult> ProcessStatementAsync(UploadedFile file)
+        {
+            await using var pdfStream = file.ContentStream;  // owned by app layer now
+            using var document = PdfDocument.Open(pdfStream);
+
+            var sb = new StringBuilder();
+
+            foreach (var page in document.GetPages())
+            {
+                foreach (var word in page.GetWords())
+                {
+                    sb.Append(word.Text);
+                    sb.Append(' ');
+                }
+
+                sb.AppendLine();
+            }
+
+            return ParseStatement(sb.ToString());
+        }
+
+        private StatementResult ParseStatement(string text)
+        {
+            return new StatementResult(text);
+        }
+    }
