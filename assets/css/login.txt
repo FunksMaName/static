@@ -630,3 +630,66 @@ const Demo = () => {
 
 export default Demo;
 
+ public async Task<byte[]> MergeAsync(byte[] localBytes, Stream uploadedStream)
+    {
+        // Copy an uploaded stream into a seekable memory stream
+        using var uploadedMs = new MemoryStream();
+        await uploadedStream.CopyToAsync(uploadedMs);
+        uploadedMs.Position = 0;
+
+        using var localMs = new MemoryStream(localBytes, writable: false);
+        using var merged = new PdfSharpCore.Pdf.PdfDocument();
+
+        // Place the uploaded document FIRST
+        using (var uploadedDoc = PdfReader.Open(uploadedMs, PdfDocumentOpenMode.Import))
+        {
+            foreach (var pdfPage in uploadedDoc.Pages)
+            {
+                merged.AddPage(pdfPage);
+            }
+        }
+
+        // Then append the local document
+        using (var localDoc = PdfReader.Open(localMs, PdfDocumentOpenMode.Import))
+        {
+            foreach (var pdfPage in localDoc.Pages)
+            {
+                merged.AddPage(pdfPage);
+            }
+        }
+
+        using var outMs = new MemoryStream();
+        merged.Save(outMs, closeStream: false);
+        return outMs.ToArray();
+    }
+
+app.MapPost("/uploads", async (IFormFile file) =>
+{
+    if (file.Length == 0)
+    {
+        return Results.BadRequest("No file uploaded or file is empty.");
+    }
+    
+    if (!file.ContentType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine($"Warning: unexpected content type {file.ContentType}");
+    }
+    
+    if(string.IsNullOrWhiteSpace(file.FileName))
+        return Results.BadRequest("No file name");
+    
+    // Load the local PDF and merge with the uploaded one (uploaded should come first)
+    var localBytes = await File.ReadAllBytesAsync(
+        @"C:\code\TestLocalAuth\TestLocalAuth\TestLocalAuth\docs\Main-Document.pdf");
+
+    await using var uploadedStream = file.OpenReadStream();
+
+    var merger = new DocumentMerger();
+    var mergedBytes = await merger.MergeAsync(localBytes, uploadedStream);
+
+    var downloadName = Path.GetFileNameWithoutExtension(file.FileName);
+    if (string.IsNullOrWhiteSpace(downloadName)) downloadName = "uploaded";
+    var resultName = $"merged-{downloadName}.pdf";
+
+    return Results.File(mergedBytes, "application/pdf", resultName);
+}).DisableAntiforgery();
