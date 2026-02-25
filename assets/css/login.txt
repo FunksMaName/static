@@ -693,3 +693,5 @@ app.MapPost("/uploads", async (IFormFile file) =>
 
     return Results.File(mergedBytes, "application/pdf", resultName);
 }).DisableAntiforgery();
+
+// https://docs.google.com/spreadsheets/d/1IQZZvWXnAEv8fiwxyydOA7XGQ3cw2VXkaMOPgEvczfs/edit?usp=sharing
