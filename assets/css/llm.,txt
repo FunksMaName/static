@@ -372,3 +372,42 @@ auth.MapPost("/upload", async (IFormFile file) =>
             return new StatementResult(text);
         }
     }
+
+
+CREATE TABLE word (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    word TEXT NOT NULL UNIQUE,
+    phonetic TEXT,
+    complexity INTEGER NOT NULL CHECK (complexity BETWEEN 1 AND 5)
+);
+
+CREATE TABLE word_meaning (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    word_id INTEGER NOT NULL,
+    meaning TEXT NOT NULL,
+    part_of_speech TEXT NOT NULL,
+    category TEXT,
+    provider INTEGER NOT NULL CHECK (provider BETWEEN 1 AND 3),
+    FOREIGN KEY (word_id) REFERENCES word(id) ON DELETE CASCADE
+);
+
+CREATE TABLE word_meaning_sentence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    word_meaning_id INTEGER NOT NULL,
+    sentence TEXT NOT NULL,
+    FOREIGN KEY (word_meaning_id) REFERENCES word_meaning(id) ON DELETE CASCADE
+);
+
+CREATE TABLE word_meaning_antonym (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    word_meaning_id INTEGER NOT NULL,
+    antonym TEXT NOT NULL,
+    FOREIGN KEY (word_meaning_id) REFERENCES word_meaning(id) ON DELETE CASCADE
+);
+
+CREATE TABLE word_meaning_synonym (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    word_meaning_id INTEGER NOT NULL,
+    synonym TEXT NOT NULL,
+    FOREIGN KEY (word_meaning_id) REFERENCES word_meaning(id) ON DELETE CASCADE
+);
